@@ -1,0 +1,3 @@
+".\Objects\SER_DAC.obj" 
+TO ".\Objects\PlcMcuModbusCommunication" 
+PRINT(".\Listings\PlcMcuModbusCommunication.m51") RAMSIZE(256) 

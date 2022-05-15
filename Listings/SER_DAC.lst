@@ -1,0 +1,883 @@
+C51 COMPILER V9.60.0.0   SER_DAC                                                           05/15/2022 12:57:58 PAGE 1   
+
+
+C51 COMPILER V9.60.0.0, COMPILATION OF MODULE SER_DAC
+OBJECT MODULE PLACED IN .\Objects\SER_DAC.obj
+COMPILER INVOKED BY: C:\Keil_v5\C51\BIN\C51.EXE SER_DAC.c LARGE OPTIMIZE(9,SPEED) BROWSE DEBUG OBJECTEXTEND PRINT(.\List
+                    -ings\SER_DAC.lst) TABS(2) OBJECT(.\Objects\SER_DAC.obj)
+
+line level    source
+
+   1          #include <stc11fxx.h>//ͷ�ļ�
+   2          //#include <intrins.h>
+   3          #include "LCD1602_4.H"
+   4          #include <string.h>
+   5          #define uchar unsigned char//�궨��
+   6          #define uint unsigned int//�궨��
+   7          #define u8 unsigned char
+   8          #define u16 unsigned short
+   9          #define U8 unsigned char
+  10          #define U16 unsigned short
+  11          #define TRUE 1U
+  12          #define FALSE 0U
+  13          #define ccts(c1, c2)    ((((c1) << 8) & 0xFF00) + ((c2) & 0x00FF))
+  14          
+  15          typedef struct {
+  16              u8          received;
+  17              u8          waiting_head_byte;
+  18              u8          pos;
+  19              u8          packet_data[50];
+  20              //TIMER_ID    terminal_timerid;
+  21          } reg_context_t;
+  22          reg_context_t reg_context = {0,0,0,{0}};
+  23          
+  24          sbit  SCLK=P1^6;//TLC5615ʱ����
+  25          //sbit  CS=P1^5;//TLC5615Ƭѡ
+  26          //sbit  DIN=P1^7;//TLC5615������
+  27          sbit  CS=P1^7;//TLC5615Ƭѡ
+  28          sbit  DIN=P1^5;//TLC5615������
+  29          
+  30          
+  31          sbit  SW1=P1^4;
+  32          
+  33          sbit  SIRQ=P3^2;
+  34          
+  35          
+  36          sbit  TXEN=P3^4;
+  37          sbit  SW2=P3^5;
+  38          sbit  RLED=P3^5;
+  39          //sbit  GLED=P3^4;
+  40          
+  41          
+  42          #define LCD_BUS P1
+  43          sbit RS=P3^3;
+  44          sbit EN=P3^7;
+  45          
+  46          sbit stcf11_Rst_Pin = P3^6;
+  47          
+  48          /*2022.5.14*/
+  49          //sbit Port_Pin_Test = P1^2 ;//panq,test for 1ms timer interrup
+  50          
+  51          uint  S_dat;//���α���
+  52          bit   flag=0;//����OK��־
+  53          unsigned int TopData=0,LowData=0;
+  54          
+C51 COMPILER V9.60.0.0   SER_DAC                                                           05/15/2022 12:57:58 PAGE 2   
+
+  55          float base=0.0048828,TopVol=0,LowVol=0,PI=0,DO=0,RO=0;
+  56          unsigned char PI8H,PI8L,DO8H,DO8L;
+  57          
+  58          #define     ClearLCD       0x01
+  59          #define     Return         0x02
+  60          #define     EntryMode      0x06
+  61          #define     DisplayOn      0x0c
+  62          #define     FunctionSet    0x28
+  63          #define     DisplayOff     0x08      //
+  64          
+  65          /*******************************************************************************************************/
+  66          #define TEST_UART_STRING "PLC MCU Commuciation demo v0.01\r\n"
+  67          unsigned char T0RH = 0;     
+  68          unsigned char T0RL = 0;     
+  69          //unsigned char RxdByte = 0;  
+  70          unsigned int g_SoftTimerCnt = 0;
+  71          unsigned int g_SoftTimerEnable = 0;
+  72          u8 __local_reg_data[8] = {0x55,0xaa,0x12,0x34};
+  73          
+  74          /*Note:time 2022.5.14,add Timer and Uart module*/
+  75          void ConfigTimer0(unsigned int ms);
+  76          void Uart_RT_Init(void);
+  77          //void System_Init(void);
+  78          void SendUartOneByte(unsigned char byte_to_send);
+  79          void SendUartMultiBytes(unsigned char *p_multiBytes,unsigned char len);
+  80          void delay_ms_for_modbus(unsigned int ms);
+  81          u8 reg_command_receive(u8 rdata);
+  82          /*
+  83          Function Prototype: void ConfigTimer0(unsigned int ms)
+  84          Entry Params: ms,the time how long to interrupt one timer .eg,configTimer0(5),5 ms invoke one Interrupt
+  85          Return Value:void
+  86          Author:
+  87          Time: 2022-5-14
+  88          description: config Timer0,enable timer 0 Interrupt
+  89          */
+  90          unsigned short modbus_crc16_calc(unsigned char dat, unsigned short crc)
+  91          {
+  92   1          unsigned char  i = 0;
+  93   1          unsigned short check = 0;
+  94   1          crc = crc ^ dat;
+  95   1      
+  96   1          for (i=0; i<8; i++)
+  97   1          {
+  98   2              check = crc & 1;
+  99   2              crc = crc >> 1;
+ 100   2              crc = crc & 0x7FFF;
+ 101   2      
+ 102   2              if (1 == check)
+ 103   2              {
+ 104   3                  crc = crc ^ 0xA001;
+ 105   3              }
+ 106   2              crc = crc & 0xFFFF;
+ 107   2          }
+ 108   1      
+ 109   1          return crc;
+ 110   1      }
+ 111          
+ 112          unsigned short modbus_crc16(const unsigned char *buf, unsigned int len)
+ 113          {
+ 114   1          /*register */int counter;
+ 115   1          /*register */unsigned short crc = 0xFFFF;
+ 116   1      
+C51 COMPILER V9.60.0.0   SER_DAC                                                           05/15/2022 12:57:58 PAGE 3   
+
+ 117   1          for (counter=0; counter<len; counter++)
+ 118   1          {
+ 119   2              crc = modbus_crc16_calc(buf[counter], crc);
+ 120   2          }
+ 121   1      
+ 122   1          return crc;
+ 123   1      }
+ 124          
+ 125          unsigned char modbus_crc16_check(unsigned char *buf, unsigned short buf_len)
+ 126          {
+ 127   1          //u8  i;
+ 128   1          U8  crch;
+ 129   1          U8  crcl;
+ 130   1          U16 crc;
+ 131   1              
+ 132   1      //    if (buf_len <= 4)
+ 133   1      //    {
+ 134   1      //        return 0;
+ 135   1      //    }
+ 136   1      
+ 137   1          // 计算CRC校验
+ 138   1          crc = modbus_crc16(buf, buf_len - 2);
+ 139   1          crch = (U8)(crc >> 8);
+ 140   1          crcl = (U8)(crc);
+ 141   1      
+ 142   1      //    if ((crcl != buf[buf_len - 2]) || (crch != buf[buf_len - 1]))
+ 143   1      //    {
+ 144   1      //        return 0;
+ 145   1      //    }
+ 146   1      
+ 147   1          return 1;
+ 148   1      }
+ 149          
+ 150          u8 reg_modbus_crc_check(u8 *buf, u16 len)
+ 151          {
+ 152   1          u8  crch;
+ 153   1          u8  crcl;
+ 154   1          u16 crc;
+ 155   1      
+ 156   1          if (len < 8)
+ 157   1          {
+ 158   2              return -1;
+ 159   2          }
+ 160   1      
+ 161   1          crc = modbus_crc16(buf, len - 2);
+ 162   1          crch = (U8)(crc >> 8);
+ 163   1          crcl = (U8)(crc);
+ 164   1      
+ 165   1      //    if ((crcl != buf[len - 2]) || (crch != buf[len - 1]))
+ 166   1      //    {
+ 167   1      //         return -2;
+ 168   1      //    }
+ 169   1          return 0;
+ 170   1      }
+ 171          
+ 172          
+ 173          
+ 174          
+ 175          
+ 176          
+ 177          
+ 178          
+C51 COMPILER V9.60.0.0   SER_DAC                                                           05/15/2022 12:57:58 PAGE 4   
+
+ 179          void ConfigTimer0(unsigned int ms)
+ 180          {
+ 181   1          unsigned long tmp;  //ÁÙÊ±±äÁ¿
+ 182   1          
+ 183   1          tmp = 11059200 / 12;      
+ 184   1          tmp = (tmp * ms) / 1000;  
+ 185   1          tmp = 65536 - tmp;        
+ 186   1          tmp = tmp + 18;           
+ 187   1          T0RH = (unsigned char)(tmp>>8);  
+ 188   1          T0RL = (unsigned char)tmp;
+ 189   1          TMOD &= 0xF0;   
+ 190   1          TMOD |= 0x01;   
+ 191   1          TH0 = T0RH;     
+ 192   1          TL0 = T0RL;
+ 193   1          ET0 = 1;        
+ 194   1          TR0 = 1;        
+ 195   1      }
+ 196          
+ 197          /*
+ 198          Function Prototype: void Uart_RT_Init()
+ 199          Entry Params: baud ,eg,9600,115200 etc,
+ 200          Return Value:void
+ 201          Author:
+ 202          Time: 2022-5-14
+ 203          description: config uart baudrate,enable uart interrupt
+ 204          */
+ 205          void Uart_RT_Init(void)
+ 206          {
+ 207   1          //SCON = 0X50;
+ 208   1        SCON = 0xd0;
+ 209   1        TMOD &= 0X0F;
+ 210   1        TMOD |= 0X20;
+ 211   1        //TH1 = 220;
+ 212   1        //TL1 = 220;
+ 213   1        TH1 = 253;
+ 214   1        TL1 = 253;
+ 215   1        TR1 =1;
+ 216   1        ES = 1;
+ 217   1      }
+ 218          
+ 219          u8 reg_command_receive(u8 rdata)
+ 220          {
+ 221   1       if (reg_context.waiting_head_byte == TRUE)
+ 222   1          {
+ 223   2              // 如果是接收到的第一个字节 则判断下是否是EDA的数据包头 不是则直接返
+             -回
+ 224   2      //        if (rdata != 0x1)
+ 225   2      //        //if (rdata != 0x01)
+ 226   2      //        {
+ 227   2      //            // 所有的EDA应答数据包都是由EDA_PACKET_HEAD开始 这样可以有效过滤到非�
+             -��字符
+ 228   2      //            return -1;
+ 229   2      //        }
+ 230   2      
+ 231   2              reg_context.waiting_head_byte = FALSE;        
+ 232   2              reg_context.received = FALSE;
+ 233   2      
+ 234   2              reg_context.pos = 0;
+ 235   2              reg_context.packet_data[reg_context.pos++] = rdata;
+ 236   2            g_SoftTimerCnt = 0;
+ 237   2            g_SoftTimerEnable = 1;
+ 238   2              //timerStart(g_hTimer, reg_context.terminal_timerid, FALSE);
+C51 COMPILER V9.60.0.0   SER_DAC                                                           05/15/2022 12:57:58 PAGE 5   
+
+ 239   2          }
+ 240   1          else
+ 241   1          {
+ 242   2              // 如果连续收到的数据超过了规定的最大长度 则忽略后续接收到的数据
+ 243   2      //        if (reg_context.pos >= 100)
+ 244   2      //        {
+ 245   2      //      g_SoftTimerCnt = 0;
+ 246   2      //      g_SoftTimerEnable = 1;
+ 247   2      //            //timerStart(g_hTimer, reg_context.terminal_timerid, FALSE);
+ 248   2      //            return 0;
+ 249   2      //        }
+ 250   2      
+ 251   2              reg_context.packet_data[reg_context.pos++] = rdata;
+ 252   2              //timerStart(g_hTimer, reg_context.terminal_timerid, FALSE);
+ 253   2          g_SoftTimerCnt = 0;
+ 254   2          g_SoftTimerEnable = 1;
+ 255   2        }
+ 256   1      
+ 257   1          return 0;
+ 258   1      }
+ 259          
+ 260          
+ 261          /*isr for timer0,1ms enter this function one time*/
+ 262          void InterruptTimer0() interrupt 1
+ 263          {
+ 264   1          TH0 = T0RH;  //ÖØÐÂ¼ÓÔØÖØÔØÖµ
+ 265   1          TL0 = T0RL;
+ 266   1      
+ 267   1        if( g_SoftTimerEnable == 1)
+ 268   1        {
+ 269   2          g_SoftTimerCnt++;
+ 270   2        }
+ 271   1        
+ 272   1      //  if(g_SoftTimerCnt >= 0xFFFFFFFF) 
+ 273   1      //  {
+ 274   1      //    g_SoftTimerCnt = 0;
+ 275   1      //  }
+ 276   1        
+ 277   1        //Port_Pin_Test = !Port_Pin_Test;
+ 278   1      }
+ 279          
+ 280          /*uart interrupt,when recevie a char from uart instrument,enter this function*/
+ 281          void Interrupt_Uart() interrupt 4
+ 282          {
+ 283   1        u8 uch;
+ 284   1         /*if(TI == 1)
+ 285   1         {
+ 286   1            TI = 0;
+ 287   1          REN = 1;
+ 288   1         }*/
+ 289   1         if(RI == 1)
+ 290   1         {
+ 291   2            RI = 0;
+ 292   2          uch = SBUF;
+ 293   2          if(RB8 = P)
+ 294   2            {
+ 295   3      
+ 296   3            }
+ 297   2      #if 1
+ 298   2        reg_command_receive(uch);
+ 299   2      #endif
+ 300   2          //SBUF =  RxdByte;
+C51 COMPILER V9.60.0.0   SER_DAC                                                           05/15/2022 12:57:58 PAGE 6   
+
+ 301   2          //REN = 0;  
+ 302   2         }
+ 303   1      
+ 304   1      
+ 305   1      }
+ 306          
+ 307          /*system initial,like timer,uart module,global interrupt enable */
+ 308          //void System_Init(void)
+ 309          //{
+ 310          //  EA = 1;//opem global interrupt enable
+ 311          ////  Port_Pin_Test = 0;
+ 312          //  ConfigTimer0(1);
+ 313          //  Uart_RT_Init();//baud rate 9600
+ 314          //}
+ 315          
+ 316          /*send one byte by uart*/
+ 317          void SendUartOneByte(unsigned char byte_to_send)
+ 318          {
+ 319   1        TB8 = P;
+ 320   1        SBUF = byte_to_send;
+ 321   1        while(0 == TI);
+ 322   1        TI = 0;
+ 323   1      }
+ 324          
+ 325          void SendUartMultiBytes(unsigned char *p_multiBytes,unsigned char len)
+ 326          {
+ 327   1        unsigned char i;
+ 328   1      //  if(((void *)p_multiBytes == (void*)0) || (len == 0))
+ 329   1      //  {
+ 330   1      //    return;
+ 331   1      //  }
+ 332   1        for(i=0;i<len;i++)
+ 333   1        {
+ 334   2          SendUartOneByte(p_multiBytes[i]);
+ 335   2        }
+ 336   1      }
+ 337          
+ 338          void delay_ms_for_modbus(unsigned int ms)
+ 339          {
+ 340   1        unsigned int tmp = ms*93;
+ 341   1      //  if(ms <= 0) return;
+ 342   1        while(tmp--);
+ 343   1      }
+ 344          
+ 345          /*********************************************************************************************************
+             -/
+ 346          //void Delay1500ms(void)    //@11.0592MHz
+ 347          //{
+ 348          //  unsigned char i, j, k;
+ 349          
+ 350          //  i = 64;
+ 351          //  j = 9;
+ 352          //  k = 179;
+ 353          //  do
+ 354          //  {
+ 355          //    do
+ 356          //    {
+ 357          //      while (--k);
+ 358          //    } while (--j);
+ 359          //  } while (--i);
+ 360          //}
+ 361          
+C51 COMPILER V9.60.0.0   SER_DAC                                                           05/15/2022 12:57:58 PAGE 7   
+
+ 362          //void Delay1000ms()    //@11.0592MHz
+ 363          //{
+ 364          //  unsigned char i, j, k;
+ 365          
+ 366          //  i = 43;
+ 367          //  j = 6;
+ 368          //  k = 203;
+ 369          //  do
+ 370          //  {
+ 371          //    do
+ 372          //    {
+ 373          //      while (--k);
+ 374          //    } while (--j);
+ 375          //  } while (--i);
+ 376          //}
+ 377          
+ 378          
+ 379          ///*****************************************************/
+ 380          ///*void delay(uint x)//�ӳٺ���
+ 381          //{
+ 382          //  uint a,b;
+ 383          //  for(a=0;a<50;a++)
+ 384          //  for(b=x;b>0;b--);
+ 385          //  } */
+ 386          //  
+ 387          ///*****************************************************/  
+ 388          //void Delay500us()   //@11.0592MHz
+ 389          //{
+ 390          //  unsigned char i, j;
+ 391          //  i = 6;j = 93;
+ 392          //  do{ while (--j);} 
+ 393          //  while (--i);
+ 394          //}
+ 395          
+ 396          //void Delay10ms()    //@11.0592MHz
+ 397          //{
+ 398          //  unsigned char i, j;
+ 399          
+ 400          //  _nop_();
+ 401          //  _nop_();
+ 402          //  i = 108;
+ 403          //  j = 144;
+ 404          //  do
+ 405          //  {
+ 406          //    while (--j);
+ 407          //  } while (--i);
+ 408          //}
+ 409          
+ 410          //void Delay2ms()   //@11.0592MHz
+ 411          //{
+ 412          //  unsigned char i, j;
+ 413          
+ 414          //  i = 22;
+ 415          //  j = 128;
+ 416          //  do
+ 417          //  {
+ 418          //    while (--j);
+ 419          //  } while (--i);
+ 420          //}
+ 421          
+ 422          //void Delay200ms()   //@11.0592MHz
+ 423          //{
+C51 COMPILER V9.60.0.0   SER_DAC                                                           05/15/2022 12:57:58 PAGE 8   
+
+ 424          //  unsigned char i, j, k;
+ 425          
+ 426          //  i = 9;
+ 427          //  j = 104;
+ 428          //  k = 139;
+ 429          //  do
+ 430          //  {
+ 431          //    do
+ 432          //    {
+ 433          //      while (--k);
+ 434          //    } while (--j);
+ 435          //  } while (--i);
+ 436          //}
+ 437          
+ 438          //void Delay2000ms()    //@11.0592MHz
+ 439          //{
+ 440          //  unsigned char i, j, k;
+ 441          
+ 442          //  i = 85;
+ 443          //  j = 12;
+ 444          //  k = 155;
+ 445          //  do
+ 446          //  {
+ 447          //    do
+ 448          //    {
+ 449          //      while (--k);
+ 450          //    } while (--j);
+ 451          //  } while (--i);
+ 452          //}
+ 453          
+ 454          //void Delay100ms()   //@11.0592MHz
+ 455          //{
+ 456          //  unsigned char i, j, k;
+ 457          
+ 458          //  i = 5;
+ 459          //  j = 52;
+ 460          //  k = 195;
+ 461          //  do
+ 462          //  {
+ 463          //    do
+ 464          //    {
+ 465          //      while (--k);
+ 466          //    } while (--j);
+ 467          //  } while (--i);
+ 468          //}
+ 469          
+ 470          //void Delay1ms()   //@11.0592MHz
+ 471          //{
+ 472          //  unsigned char i, j;
+ 473          
+ 474          //  _nop_();
+ 475          //  i = 11;
+ 476          //  j = 190;
+ 477          //  do
+ 478          //  {
+ 479          //    while (--j);
+ 480          //  } while (--i);
+ 481          //}
+ 482          
+ 483          
+ 484          /*****************************************************/
+ 485          void DAConvert(uint Data) //DACת������
+C51 COMPILER V9.60.0.0   SER_DAC                                                           05/15/2022 12:57:58 PAGE 9   
+
+ 486          { 
+ 487   1        uchar i; 
+ 488   1        Data<<=6;//��������6λ,�ұ߶��� 
+ 489   1        SCLK=0; 
+ 490   1        CS=0; 
+ 491   1        for (i=0;i<12;i++)//
+ 492   1        { 
+ 493   2          if(Data&0x8000) 
+ 494   2          DIN=1; 
+ 495   2          else DIN=0; 
+ 496   2          SCLK=1;  
+ 497   2          Data<<=1; 
+ 498   2          SCLK=0; 
+ 499   2        }  
+ 500   1        CS=1; 
+ 501   1      } 
+ 502          
+ 503          //void delayms(uint ms)    //��ʱxx����
+ 504          //{
+ 505          //  uchar i;
+ 506          //  while(ms--)
+ 507          //  {
+ 508          //    for(i=0;i<120;i++);
+ 509          //  }
+ 510          //}
+ 511          
+ 512          void EX_INT0() interrupt 0
+ 513          {
+ 514   1         flag=1;
+ 515   1      }
+ 516          
+ 517          //void SendOut(void)
+ 518          //{
+ 519          //  TXEN=1;         //485���뷢��ģʽ
+ 520          //  //SM2=0;          
+ 521          //  SBUF=PI8H;  //װ��
+ 522          //  while(TI!=1);TI=0;  //�ȴ����ڷ������
+ 523          //  delayms(10);
+ 524          //  SBUF=PI8L;//װ��
+ 525          //  while(TI!=1);TI=0;  //�ȴ����ڷ������
+ 526          //  delayms(10);
+ 527          //  SBUF=DO8H;  //װ��
+ 528          //  while(TI!=1);TI=0;  //�ȴ����ڷ������
+ 529          //  delayms(10);
+ 530          //  SBUF=DO8L;//װ��
+ 531          //  while(TI!=1);TI=0;  //�ȴ����ڷ������
+ 532          //  delayms(10);
+ 533          //    
+ 534          //}
+ 535          
+ 536          
+ 537          
+ 538          /*****************************************************/
+ 539          void main(void)
+ 540          {
+ 541   1        unsigned int i=0,temp=0,tempA=0,tempB=0,j=0;
+ 542   1        u16 reg_addr;
+ 543   1        u16 reg_num;
+ 544   1        u16 crc;
+ 545   1      
+ 546   1        stcf11_Rst_Pin = 0;
+ 547   1      #if 0
+C51 COMPILER V9.60.0.0   SER_DAC                                                           05/15/2022 12:57:58 PAGE 10  
+
+                //IAP_CONTR = 0x60;
+                AUXR=0x00;
+                TMOD=0x20;      //���ö�ʱ��1Ϊ������ʽ2���Զ�����8λ����
+                TL1=0xfd;     //��ʱ��1װ�س�ʼֵ
+                TH1=0xfd;
+                PCON=0x00;      //SMOD=0; ���ڷ�ʽ1��2��3ʱ������������ 
+                TR1=1;        //������ʱ��1  
+                SCON=0x50;      //���пڿ��ƼĴ���
+              #endif
+ 557   1        //System_Init();//2022.5.14
+ 558   1        EA = 1;//opem global interrupt enable
+ 559   1        //  Port_Pin_Test = 0;
+ 560   1        ConfigTimer0(1);
+ 561   1        Uart_RT_Init();//baud rate 9600
+ 562   1        //SendUartOneByte('a');
+ 563   1        //SendUartMultiBytes(TEST_UART_STRING,sizeof(TEST_UART_STRING));
+ 564   1      #if 1
+ 565   1        //EA=1;         //�����ж�
+ 566   1        TXEN=1;       //485���뷢��ģʽ
+ 567   1        CLK_DIV=0x00;
+ 568   1        RLED=1;//GLED=1;
+ 569   1        SW1=1;SW2=1;
+ 570   1        //delayms(100);
+ 571   1        delay_ms_for_modbus(100);
+ 572   1      
+ 573   1      
+ 574   1         LCD_init();
+ 575   1        LCD_clr();
+ 576   1        LCD_prints(0,0,"PI:00.0 P-D:  . ");
+ 577   1        LCD_prints(0,1,"DO:00.0 D/P: 0% ");
+ 578   1        LCD_printc(15,0,' ');
+ 579   1        DAConvert(0);
+ 580   1        PI8H=0xaa,PI8L=0xaa;
+ 581   1        DO8H=0x55,DO8L=0x55;
+ 582   1      #endif
+ 583   1        while(1)
+ 584   1        {
+ 585   2      #if 1
+ 586   2        //delay_ms_for_modbus(1000);
+ 587   2        //stcf11_Rst_Pin = !stcf11_Rst_Pin;
+ 588   2        //Port_Pin_Test = !Port_Pin_Test; 
+ 589   2        //SendUartOneByte('b');
+ 590   2        //SendUartMultiBytes(TEST_UART_STRING,sizeof(TEST_UART_STRING));
+ 591   2          if(10 <= g_SoftTimerCnt)
+ 592   2          {
+ 593   3            reg_context.waiting_head_byte == TRUE;
+*** WARNING C275 IN LINE 593 OF SER_DAC.c: expression with possibly no effect
+ 594   3            g_SoftTimerEnable = 0;
+ 595   3            g_SoftTimerCnt = 0;
+ 596   3            
+ 597   3      /*********************************************************************************************************
+             -******/
+ 598   3      /*unpack modbus adu*/   
+ 599   3            reg_modbus_crc_check(&reg_context.packet_data[0],reg_context.pos);
+ 600   3      //      if(reg_context.packet_data[0] != 0x1)
+ 601   3      //      {
+ 602   3      //        return ;
+ 603   3      //      }
+ 604   3      
+ 605   3            switch(reg_context.packet_data[1])
+ 606   3            {
+ 607   4              case 0x4:/*read input registers*/
+C51 COMPILER V9.60.0.0   SER_DAC                                                           05/15/2022 12:57:58 PAGE 11  
+
+ 608   4              {
+ 609   5                reg_addr = ccts(reg_context.packet_data[2],reg_context.packet_data[3]);
+ 610   5                reg_num = ccts(reg_context.packet_data[4],reg_context.packet_data[5]);
+ 611   5      
+ 612   5                //response
+ 613   5                reg_context.packet_data[0] = 0x1; //0x01;
+ 614   5                  reg_context.packet_data[1] = 0x04;
+ 615   5                   reg_context.packet_data[2] = 2*reg_num;
+ 616   5                for (i=0; i<reg_num; i++)
+ 617   5                {
+ 618   6                  reg_context.packet_data[3+2*i]   = (u8)(__local_reg_data[i*2]);
+ 619   6                  reg_context.packet_data[3+2*i+1] = (u8)(__local_reg_data[i*2+1]);
+ 620   6                }
+ 621   5                crc = modbus_crc16(reg_context.packet_data, 3+2*reg_num);
+ 622   5                reg_context.packet_data[3+2*reg_num]   = (u8)(crc);
+ 623   5                reg_context.packet_data[3+2*reg_num+1]   = (u8)(crc>>8);
+ 624   5                SendUartMultiBytes(&reg_context.packet_data[0],5+2*reg_num);
+ 625   5                reg_context.pos = 0;
+ 626   5                //reg_context.received = FALSE;
+ 627   5              }
+ 628   4              break;
+ 629   4      
+ 630   4              default:
+ 631   4              break;
+ 632   4            }
+ 633   3            
+ 634   3      /*********************************************************************************************************
+             -*****/
+ 635   3      
+ 636   3      /*********************************************************************************************************
+             -*****/
+ 637   3      /*response to PLC*/
+ 638   3            //g_modbus_receive_buf_PacketTail_notify = 0x0;
+ 639   3            SendUartMultiBytes(&reg_context.packet_data[0],reg_context.pos);
+ 640   3            memset(&reg_context.packet_data[0],0x0,reg_context.pos);
+ 641   3            reg_context.pos = 0;
+ 642   3            //SendUartMultiBytes(g_modbus_receive_buf_T,g_modbus_receive_buf_PacketTail_pos);
+ 643   3            //memset(g_modbus_receive_buf_T,0x0,200);
+ 644   3            //g_modbus_receive_buf_PacketTail_pos = 0;
+ 645   3      /*********************************************************************************************************
+             -*****/
+ 646   3          }
+ 647   2      #endif
+ 648   2          //SendOut();delayms(100);
+ 649   2      #if 1
+ 650   2          SW1=1;
+ 651   2          if(SW1==0)
+ 652   2          {
+ 653   3            //RLED=1;GLED=1;
+ 654   3            DAConvert(0);
+ 655   3            LCD_prints(0,0,"PI:00.0 P-D:  . ");
+ 656   3            LCD_prints(0,1,"DO:00.0 D/P: 0% ");
+ 657   3            //Delay10ms();
+ 658   3            delay_ms_for_modbus(10);
+ 659   3            DAConvert(1023);
+ 660   3            //for(j=0;j<20;j++) Delay100ms(); //////////B�Σ����5V��ʱ��100ms*20
+ 661   3            for(j=0;j<20;j++) delay_ms_for_modbus(100);
+ 662   3            DAConvert(0);
+ 663   3            //for(j=0;j<20;j++) Delay100ms();  //////////C�Σ����0V��ʱ��100ms*20
+ 664   3            for(j=0;j<20;j++) delay_ms_for_modbus(100); 
+ 665   3            if(SIRQ==0)
+ 666   3            {
+C51 COMPILER V9.60.0.0   SER_DAC                                                           05/15/2022 12:57:58 PAGE 12  
+
+ 667   4              LCD_prints(3,0,">S< ");
+ 668   4            }
+ 669   3            else
+ 670   3            {
+ 671   4              for(i=0;i<1024;i++) //D�����
+ 672   4              {
+ 673   5                DAConvert(i);
+ 674   5                //TopData=i;
+ 675   5                //Delay500us();
+ 676   5                //Delay500us();
+ 677   5                delay_ms_for_modbus(1);
+ 678   5                if(SIRQ==0)
+ 679   5                {
+ 680   6                  TopData=i;
+ 681   6                  break;
+ 682   6                }
+ 683   5              }
+ 684   4              
+ 685   4              
+ 686   4              if(SIRQ==1) 
+ 687   4              { 
+ 688   5                //RLED=0;
+ 689   5                DAConvert(0);
+ 690   5                LCD_prints(3,0,">W< ");
+ 691   5              }
+ 692   4              else
+ 693   4              {
+ 694   5                //for(j=0;j<10;j++) Delay1ms();   //E�Σ���ʱ2ms
+ 695   5                for(j=0;j<10;j++) delay_ms_for_modbus(1); 
+ 696   5                DAConvert(TopData+102);//DAConvert(TopData+0.5/base);��0.5V
+ 697   5                //for(j=0;j<10;j++) Delay1ms(); //F�Σ���ʱ10ms
+ 698   5                for(j=0;j<10;j++) delay_ms_for_modbus(1); 
+ 699   5                TopVol=(TopData)*base;
+ 700   5                PI=TopVol/0.005;
+ 701   5                //PI=12.174*PI-27.53;
+ 702   5                tempB=(unsigned int)PI;
+ 703   5                PI8H=tempB/256;
+ 704   5                PI8L=tempB%256;
+ 705   5                LCD_printc(3,0,tempB/100+0x30);
+ 706   5                LCD_printc(4,0,(tempB%100)/10+0x30);
+ 707   5                LCD_printc(6,0,tempB%10+0x30);
+ 708   5                
+ 709   5                //SW2=1;
+ 710   5                //while(SW1==0);
+ 711   5                //while(SW2==1);
+ 712   5                
+ 713   5          
+ 714   5                for(i=(TopData+102);i>0;i--)  //��0.5V�� G��
+ 715   5                {
+ 716   6                  DAConvert(i);
+ 717   6                  //LowData=i;
+ 718   6                  //Delay500us();
+ 719   6                  delay_ms_for_modbus(1);
+ 720   6                  //Delay500us();
+ 721   6                  if(SIRQ==1)
+ 722   6                  {
+ 723   7                    LowData=i;
+ 724   7                    break;
+ 725   7                  }
+ 726   6                }
+ 727   5                LowVol=(LowData)*base;
+ 728   5                DO=LowVol/0.005;
+C51 COMPILER V9.60.0.0   SER_DAC                                                           05/15/2022 12:57:58 PAGE 13  
+
+ 729   5                //DO=12.578*DO-39;
+ 730   5                tempA=(unsigned int)DO;
+ 731   5                DO8H=tempA/256;
+ 732   5                DO8L=tempA%256;
+ 733   5                LCD_printc(3,1,tempA/100+0x30);
+ 734   5                LCD_printc(4,1,(tempA%100)/10+0x30);
+ 735   5                LCD_printc(6,1,tempA%10+0x30);
+ 736   5                DAConvert(0);
+ 737   5      //          SendOut();
+ 738   5                RLED=0;
+ 739   5      
+ 740   5                RO=(DO/PI);
+ 741   5                temp=(unsigned int)((RO*100)+0.5);
+ 742   5                LCD_printc(13,1,temp/10+0x30);
+ 743   5                LCD_printc(14,1,temp%10+0x30);
+ 744   5                //GLED=0;
+ 745   5                //DAConvert(0);
+ 746   5                
+ 747   5                temp=tempB-tempA;
+ 748   5                LCD_printc(12,0,temp/100+0x30);
+ 749   5                LCD_printc(13,0,(temp%100)/10+0x30);
+ 750   5                LCD_printc(15,0,temp%10+0x30);
+ 751   5                RLED=0;
+ 752   5                //DAConvert(TopData);
+ 753   5                //Delay1000ms();
+ 754   5                delay_ms_for_modbus(100);
+ 755   5                //DAConvert(0);
+ 756   5                RLED=1;
+ 757   5                //while(SW2==0);
+ 758   5              }
+ 759   4            }
+ 760   3          }
+ 761   2      #endif
+ 762   2          
+ 763   2        }
+ 764   1        
+ 765   1      }
+ 766          
+ 767          
+ 768          /*****************************************************/
+ 769          /*void main(void)
+ 770          {
+ 771            unsigned int i=0,temp=0;
+ 772            CLK_DIV=0x00;
+ 773            RLED=1;GLED=1;SW=1;
+ 774            delayms(100);
+ 775            //IT0 = 1;
+ 776            //EA=1; //�����ж�  
+ 777            //EX0=0;
+ 778          
+ 779             LCD_init();
+ 780            LCD_clr();
+ 781            LCD_prints(0,0,"PI:00.0         ");
+ 782            LCD_prints(0,1,"DO:00.0   Rx: 0%");
+ 783            LCD_printc(15,0,' ');
+ 784            DAConvert(0);
+ 785            
+ 786            while(1)
+ 787            {
+ 788              SW=1;
+ 789              if(SW==0)
+ 790              {
+C51 COMPILER V9.60.0.0   SER_DAC                                                           05/15/2022 12:57:58 PAGE 14  
+
+ 791                RLED=1;GLED=1;
+ 792                LCD_prints(0,0,"PI:00.0         ");
+ 793                LCD_prints(0,1,"DO:00.0   Rx: 0%");
+ 794                
+ 795                for(i=0;i<1024;i++)
+ 796                {
+ 797                  i=330;
+ 798                  DAConvert(i);
+ 799                  TopData=i;
+ 800                  Delay500us();
+ 801                  if(SIRQ==0)
+ 802                  {
+ 803                    break;
+ 804                  }
+ 805                }
+ 806                if(SIRQ==1) 
+ 807                { 
+ 808                  RLED=0;DAConvert(0);
+ 809                }
+ 810                else
+ 811                {
+ 812                  TopVol=(TopData)*base;
+ 813                  PI=TopVol/0.005;
+ 814                  temp=(unsigned int)PI;
+ 815                  LCD_printc(3,0,temp/100+0x30);
+ 816                  LCD_printc(4,0,(temp%100)/10+0x30);
+ 817                  LCD_printc(6,0,temp%10+0x30);
+ 818                }
+ 819              }
+ 820              
+ 821            }
+ 822            
+ 823          }*/
+ 824          
+ 825          
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   2144    ----
+   CONSTANT SIZE    =     44    ----
+   XDATA SIZE       =    101      37
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =      1    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  1 WARNING(S),  0 ERROR(S)
